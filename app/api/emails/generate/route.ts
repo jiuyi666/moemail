@@ -68,35 +68,49 @@ export async function POST(request: Request) {
       where: eq(sql`LOWER(${emails.address})`, address.toLowerCase())
     })
 
+    const now = new Date()
+    const expires = expiryTime === 0 
+      ? new Date('9999-01-01T00:00:00.000Z')
+      : new Date(now.getTime() + expiryTime)
+
     if (existingEmail) {
-      const now = Date.now()
+      const nowMs = Date.now()
       const existingExpiry = existingEmail.expiresAt instanceof Date
         ? existingEmail.expiresAt.getTime()
         : new Date(existingEmail.expiresAt as unknown as string).getTime()
 
-      if (!Number.isNaN(existingExpiry) && existingExpiry > now) {
+      if (!Number.isNaN(existingExpiry) && existingExpiry > nowMs) {
         return NextResponse.json(
           { error: "该邮箱地址已被使用" },
           { status: 409 }
         )
       }
 
-      // 已过期邮箱允许复用：清理旧邮箱及其关联数据后重新创建
+      // 过期邮箱优先原地重置，避免历史外键脏数据导致删除失败
       await db.transaction(async (tx) => {
-        await tx
-          .delete(messages)
-          .where(eq(messages.emailId, existingEmail.id))
+        try {
+          await tx
+            .delete(messages)
+            .where(eq(messages.emailId, existingEmail.id))
+        } catch (cleanupError) {
+          console.warn("cleanup messages failed, continue to reset email", cleanupError)
+        }
 
         await tx
-          .delete(emails)
+          .update(emails)
+          .set({
+            userId: userId!,
+            createdAt: now,
+            expiresAt: expires
+          })
           .where(eq(emails.id, existingEmail.id))
       })
-    }
 
-    const now = new Date()
-    const expires = expiryTime === 0 
-      ? new Date('9999-01-01T00:00:00.000Z')
-      : new Date(now.getTime() + expiryTime)
+      return NextResponse.json({
+        id: existingEmail.id,
+        email: address
+      })
+    }
     
     const emailData: typeof emails.$inferInsert = {
       address,
