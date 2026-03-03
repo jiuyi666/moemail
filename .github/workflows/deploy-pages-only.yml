@@ -38,7 +38,7 @@ jobs:
 
       - name: Install Dependencies
         timeout-minutes: 12
-        run: npm ci --no-audit --no-fund --progress=false --prefer-offline
+        run: npm install --no-audit --no-fund --progress=false --prefer-offline
 
       - name: Build Pages Output
         run: npm run build:pages
