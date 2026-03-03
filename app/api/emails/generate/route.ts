@@ -87,24 +87,22 @@ export async function POST(request: Request) {
       }
 
       // 过期邮箱优先原地重置，避免历史外键脏数据导致删除失败
-      await db.transaction(async (tx) => {
-        try {
-          await tx
-            .delete(messages)
-            .where(eq(messages.emailId, existingEmail.id))
-        } catch (cleanupError) {
-          console.warn("cleanup messages failed, continue to reset email", cleanupError)
-        }
+      try {
+        await db
+          .delete(messages)
+          .where(eq(messages.emailId, existingEmail.id))
+      } catch (cleanupError) {
+        console.warn("cleanup messages failed, continue to reset email", cleanupError)
+      }
 
-        await tx
-          .update(emails)
-          .set({
-            userId: userId!,
-            createdAt: now,
-            expiresAt: expires
-          })
-          .where(eq(emails.id, existingEmail.id))
-      })
+      await db
+        .update(emails)
+        .set({
+          userId: userId!,
+          createdAt: now,
+          expiresAt: expires
+        })
+        .where(eq(emails.id, existingEmail.id))
 
       return NextResponse.json({
         id: existingEmail.id,
