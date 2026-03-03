@@ -21,6 +21,11 @@ concurrency:
 jobs:
   deploy-pages:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NPM_CONFIG_AUDIT: "false"
+      NPM_CONFIG_FUND: "false"
+      NPM_CONFIG_PROGRESS: "false"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,7 +37,8 @@ jobs:
           cache: "npm"
 
       - name: Install Dependencies
-        run: npm ci
+        timeout-minutes: 12
+        run: npm ci --no-audit --no-fund --progress=false --prefer-offline
 
       - name: Build Pages Output
         run: npm run build:pages
