@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server"
 import { nanoid } from "nanoid"
 import { createDb } from "@/lib/db"
-import { emails } from "@/lib/schema"
-import { eq, and, gt, sql } from "drizzle-orm"
+import { emails, messages, emailShares, messageShares } from "@/lib/schema"
+import { eq, and, gt, sql, inArray } from "drizzle-orm"
 import { EXPIRY_OPTIONS } from "@/types/email"
 import { EMAIL_CONFIG } from "@/config"
 import { getRequestContext } from "@cloudflare/next-on-pages"
@@ -69,10 +69,44 @@ export async function POST(request: Request) {
     })
 
     if (existingEmail) {
-      return NextResponse.json(
-        { error: "该邮箱地址已被使用" },
-        { status: 409 }
-      )
+      const now = Date.now()
+      const existingExpiry = existingEmail.expiresAt instanceof Date
+        ? existingEmail.expiresAt.getTime()
+        : new Date(existingEmail.expiresAt as unknown as string).getTime()
+
+      if (!Number.isNaN(existingExpiry) && existingExpiry > now) {
+        return NextResponse.json(
+          { error: "该邮箱地址已被使用" },
+          { status: 409 }
+        )
+      }
+
+      // 已过期邮箱允许复用：清理旧邮箱及其关联数据后重新创建
+      await db.transaction(async (tx) => {
+        const relatedMessages = await tx
+          .select({ id: messages.id })
+          .from(messages)
+          .where(eq(messages.emailId, existingEmail.id))
+
+        const messageIds = relatedMessages.map(item => item.id)
+        if (messageIds.length > 0) {
+          await tx
+            .delete(messageShares)
+            .where(inArray(messageShares.messageId, messageIds))
+        }
+
+        await tx
+          .delete(emailShares)
+          .where(eq(emailShares.emailId, existingEmail.id))
+
+        await tx
+          .delete(messages)
+          .where(eq(messages.emailId, existingEmail.id))
+
+        await tx
+          .delete(emails)
+          .where(eq(emails.id, existingEmail.id))
+      })
     }
 
     const now = new Date()
