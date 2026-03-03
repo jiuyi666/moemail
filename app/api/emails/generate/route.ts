@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server"
 import { nanoid } from "nanoid"
 import { createDb } from "@/lib/db"
-import { emails, messages, emailShares, messageShares } from "@/lib/schema"
-import { eq, and, gt, sql, inArray } from "drizzle-orm"
+import { emails, messages } from "@/lib/schema"
+import { eq, and, gt, sql } from "drizzle-orm"
 import { EXPIRY_OPTIONS } from "@/types/email"
 import { EMAIL_CONFIG } from "@/config"
 import { getRequestContext } from "@cloudflare/next-on-pages"
@@ -83,22 +83,6 @@ export async function POST(request: Request) {
 
       // 已过期邮箱允许复用：清理旧邮箱及其关联数据后重新创建
       await db.transaction(async (tx) => {
-        const relatedMessages = await tx
-          .select({ id: messages.id })
-          .from(messages)
-          .where(eq(messages.emailId, existingEmail.id))
-
-        const messageIds = relatedMessages.map(item => item.id)
-        if (messageIds.length > 0) {
-          await tx
-            .delete(messageShares)
-            .where(inArray(messageShares.messageId, messageIds))
-        }
-
-        await tx
-          .delete(emailShares)
-          .where(eq(emailShares.emailId, existingEmail.id))
-
         await tx
           .delete(messages)
           .where(eq(messages.emailId, existingEmail.id))
