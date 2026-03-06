@@ -52,6 +52,20 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: b4b8dcfc255e892c7913083b835930a8
         run: |
           test -n "$CLOUDFLARE_API_TOKEN" || (echo "CLOUDFLARE_API_TOKEN is empty" && exit 1)
-          pnpm exec wrangler --version
-          pnpm exec wrangler whoami
-          pnpm exec wrangler pages deploy .vercel/output/static --project-name moemail --branch main
+          set -o pipefail
+          {
+            echo "=== wrangler --version ==="
+            pnpm exec wrangler --version
+            echo "=== wrangler whoami ==="
+            pnpm exec wrangler whoami
+            echo "=== wrangler pages deploy ==="
+            pnpm exec wrangler pages deploy .vercel/output/static --project-name moemail --branch main
+          } 2>&1 | tee deploy-pages.log
+          status=${PIPESTATUS[0]}
+          {
+            echo "### Deploy Pages Output"
+            echo '```text'
+            cat deploy-pages.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status
