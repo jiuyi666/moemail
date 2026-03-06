@@ -52,6 +52,6 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: b4b8dcfc255e892c7913083b835930a8
         run: |
           test -n "$CLOUDFLARE_API_TOKEN" || (echo "CLOUDFLARE_API_TOKEN is empty" && exit 1)
-          npx wrangler --version
-          npx wrangler whoami
-          npx wrangler pages deploy .vercel/output/static --project-name moemail --branch main
+          pnpm exec wrangler --version
+          pnpm exec wrangler whoami
+          pnpm exec wrangler pages deploy .vercel/output/static --project-name moemail --branch main
