@@ -68,4 +68,8 @@ jobs:
             cat deploy-pages.log
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            error_tail=$(tail -n 20 deploy-pages.log | tr '\n' ' ' | sed 's/  */ /g')
+            echo "::error title=Deploy Pages Failed::$error_tail"
+          fi
           exit $status
