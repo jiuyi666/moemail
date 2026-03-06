@@ -11,6 +11,17 @@ import { getUserRole } from "@/lib/auth"
 import { ROLES } from "@/lib/permissions"
 
 export const runtime = "edge"
+const EXPIRED_EMAIL_CLEANUP_BATCH_SIZE = 200
+const EXPIRED_EMAIL_CLEANUP_MAX_BATCHES = 8
+
+type RuntimeEnv = ReturnType<typeof getRequestContext>["env"]
+
+type CleanupSummary = {
+  attempted: boolean
+  batches: number
+  deletedEmails: number
+  deletedMessages: number
+}
 
 function normalizeDomain(domain: string): string {
   return String(domain || "").trim().toLowerCase()
@@ -37,6 +48,108 @@ function isTransientDbError(error: unknown): boolean {
     text.includes("too many requests") ||
     text.includes("temporarily unavailable")
   )
+}
+
+function isDatabaseFullError(error: unknown): boolean {
+  return stringifyUnknownError(error).toLowerCase().includes("exceeded maximum db size")
+}
+
+async function cleanupExpiredEmails(
+  env: RuntimeEnv,
+  options: {
+    excludeEmailId?: string
+  } = {}
+): Promise<CleanupSummary> {
+  const summary: CleanupSummary = {
+    attempted: true,
+    batches: 0,
+    deletedEmails: 0,
+    deletedMessages: 0,
+  }
+
+  const now = Date.now()
+
+  for (let batch = 0; batch < EXPIRED_EMAIL_CLEANUP_MAX_BATCHES; batch += 1) {
+    const bindValues: Array<string | number> = [now]
+    let selectSql = `
+      SELECT id
+      FROM email
+      WHERE expires_at < ?
+    `
+
+    if (options.excludeEmailId) {
+      selectSql += " AND id != ?"
+      bindValues.push(options.excludeEmailId)
+    }
+
+    selectSql += `
+      ORDER BY expires_at ASC
+      LIMIT ?
+    `
+    bindValues.push(EXPIRED_EMAIL_CLEANUP_BATCH_SIZE)
+
+    const expiredRows = await env.DB
+      .prepare(selectSql)
+      .bind(...bindValues)
+      .all<{ id: string }>()
+
+    const ids = (expiredRows.results || [])
+      .map(row => String(row.id || "").trim())
+      .filter(Boolean)
+
+    if (!ids.length) {
+      break
+    }
+
+    summary.batches += 1
+
+    const placeholders = ids.map(() => "?").join(", ")
+    const deleteMessagesResult = await env.DB
+      .prepare(`DELETE FROM message WHERE emailId IN (${placeholders})`)
+      .bind(...ids)
+      .run()
+
+    summary.deletedMessages += Number(deleteMessagesResult.meta?.changes ?? 0)
+
+    const deleteEmailsResult = await env.DB
+      .prepare(`DELETE FROM email WHERE id IN (${placeholders})`)
+      .bind(...ids)
+      .run()
+
+    summary.deletedEmails += Number(deleteEmailsResult.meta?.changes ?? 0)
+
+    if (ids.length < EXPIRED_EMAIL_CLEANUP_BATCH_SIZE) {
+      break
+    }
+  }
+
+  return summary
+}
+
+async function withExpiredCleanupRetry<T>(
+  env: RuntimeEnv,
+  operation: () => Promise<T>,
+  onCleanup: (summary: CleanupSummary) => void,
+  options: {
+    excludeEmailId?: string
+  } = {}
+): Promise<T> {
+  try {
+    return await operation()
+  } catch (error) {
+    if (!isDatabaseFullError(error)) {
+      throw error
+    }
+
+    const summary = await cleanupExpiredEmails(env, options)
+    onCleanup(summary)
+
+    if (summary.deletedEmails === 0 && summary.deletedMessages === 0) {
+      throw error
+    }
+
+    return operation()
+  }
 }
 
 function stringifyUnknownError(error: unknown): string {
@@ -79,6 +192,7 @@ export async function POST(request: Request) {
   const db = createDb()
   const env = getRequestContext().env
   let requestMeta: { name?: string; domain?: string; expiryTime?: number } = {}
+  let cleanupSummary: CleanupSummary | null = null
 
   try {
     const userId = await getUserId()
@@ -179,21 +293,35 @@ export async function POST(request: Request) {
 
       // 过期邮箱优先原地重置，避免历史外键脏数据导致删除失败
       try {
-        await db
-          .delete(messages)
-          .where(eq(messages.emailId, existingEmail.id))
+        await withExpiredCleanupRetry(
+          env,
+          () => db
+            .delete(messages)
+            .where(eq(messages.emailId, existingEmail.id)),
+          (summary) => {
+            cleanupSummary = summary
+          },
+          { excludeEmailId: existingEmail.id }
+        )
       } catch (cleanupError) {
         console.warn("cleanup messages failed, continue to reset email", cleanupError)
       }
 
-      await db
-        .update(emails)
-        .set({
-          userId,
-          createdAt: now,
-          expiresAt: expires
-        })
-        .where(eq(emails.id, existingEmail.id))
+      await withExpiredCleanupRetry(
+        env,
+        () => db
+          .update(emails)
+          .set({
+            userId,
+            createdAt: now,
+            expiresAt: expires
+          })
+          .where(eq(emails.id, existingEmail.id)),
+        (summary) => {
+          cleanupSummary = summary
+        },
+        { excludeEmailId: existingEmail.id }
+      )
 
       return NextResponse.json({
         id: existingEmail.id,
@@ -208,9 +336,15 @@ export async function POST(request: Request) {
       userId
     }
     
-    const result = await db.insert(emails)
-      .values(emailData)
-      .returning({ id: emails.id, address: emails.address })
+    const result = await withExpiredCleanupRetry(
+      env,
+      () => db.insert(emails)
+        .values(emailData)
+        .returning({ id: emails.id, address: emails.address }),
+      (summary) => {
+        cleanupSummary = summary
+      }
+    )
     
     return NextResponse.json({ 
       id: result[0].id,
@@ -238,6 +372,7 @@ export async function POST(request: Request) {
           detail,
           traceId,
           requestMeta,
+          cleanup: cleanupSummary,
         },
         { status: 503 }
       )
@@ -247,6 +382,7 @@ export async function POST(request: Request) {
       traceId,
       detail,
       requestMeta,
+      cleanupSummary,
       error,
     })
     return NextResponse.json(
@@ -254,6 +390,7 @@ export async function POST(request: Request) {
         error: `创建邮箱失败: ${detail || "未知错误"}`,
         traceId,
         requestMeta,
+        cleanup: cleanupSummary,
       },
       { status: 500 }
     )
